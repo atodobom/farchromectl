@@ -406,6 +406,7 @@
     sendCmd("seekTo", t.duration * Number(el.scrub.value) / 1000);
   }
   el.scrub.addEventListener("pointerup", commitScrub);
+  el.scrub.addEventListener("pointercancel", function () { scrubbing = false; });
   el.scrub.addEventListener("keyup", commitScrub); // acessibilidade: setas no slider
 
   el.target.addEventListener("change", function () {
