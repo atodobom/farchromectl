@@ -1,0 +1,20 @@
+{
+  "manifest_version": 3,
+  "name": "farchromectl",
+  "version": "0.1.0",
+  "description": "Controla mídias do Chrome a partir do celular, via servidor farchromectl local.",
+  "permissions": ["tabs", "scripting", "storage"],
+  "host_permissions": ["<all_urls>"],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["content.js"],
+      "run_at": "document_idle",
+      "all_frames": false
+    }
+  ],
+  "options_page": "options.html"
+}
