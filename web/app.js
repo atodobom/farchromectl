@@ -17,6 +17,16 @@
   var RECONNECT_MAX_MS = 10000;
   var SPEEDS = [1, 1.25, 1.5, 2];
 
+  // ---------- service worker (PWA) ----------
+  // Registrado somente em contexto seguro: HTTPS (modo --tls do servidor) ou
+  // localhost. Em HTTP puro pela LAN nem tentamos — comportamento idêntico
+  // ao de antes do service worker existir (sem erros no console).
+  if ("serviceWorker" in navigator && window.isSecureContext) {
+    navigator.serviceWorker.register("/sw.js").catch(function (e) {
+      console.warn("farchromectl: service worker não registrado:", e);
+    });
+  }
+
   // ---------- estado ----------
   var creds = loadCreds(); // {baseUrl, token} | null
   var ws = null;
@@ -74,6 +84,12 @@
   }
 
   // ---------- descoberta ----------
+  // Esquema dos palpites segue o da página: servida por HTTPS (--tls), os
+  // palpites http:// virariam conteúdo misto (bloqueado) e o ws:// errado.
+  function scheme() {
+    return location.protocol === "https:" ? "https" : "http";
+  }
+
   function portOf(baseUrl) {
     try {
       var u = new URL(baseUrl);
@@ -85,9 +101,13 @@
 
   function candidates() {
     var list = [];
+    // A própria origem da página vem primeiro: quando a UI é servida pelo
+    // farchromectl (caso normal), a descoberta resolve na primeira tentativa
+    // — inclusive sobre HTTPS, onde o histórico salvo pode ainda ser http://.
+    if (location.origin && list.indexOf(location.origin) === -1) list.push(location.origin);
     if (creds && creds.baseUrl) list.push(creds.baseUrl);
     var p = creds && creds.baseUrl ? portOf(creds.baseUrl) : DEFAULT_PORT;
-    var mdns = "http://farchromectl.local:" + (p || DEFAULT_PORT);
+    var mdns = scheme() + "://farchromectl.local:" + (p || DEFAULT_PORT);
     if (list.indexOf(mdns) === -1) list.push(mdns);
     return list;
   }
@@ -131,7 +151,7 @@
         }
       } else {
         // nenhum candidato respondeu: formulário manual com palpite
-        showForm((creds && creds.baseUrl) || "http://farchromectl.local:" + DEFAULT_PORT,
+        showForm((creds && creds.baseUrl) || scheme() + "://farchromectl.local:" + DEFAULT_PORT,
                  (creds && creds.token) || "");
         setStatus("");
         showHint("Servidor não encontrado automaticamente. Confira o endereço, a rede Wi-Fi e o firewall.", false);
@@ -159,7 +179,7 @@
     var url = el.fUrl.value.trim().replace(/\/+$/, "");
     var token = el.fToken.value.trim();
     if (!/^https?:\/\/.+/.test(url)) {
-      showHint("O endereço deve começar com http:// e incluir a porta (ex.: http://192.168.0.10:8080).", true);
+      showHint("O endereço deve começar com http:// ou https:// e incluir a porta (ex.: " + scheme() + "://192.168.0.10:8080).", true);
       return;
     }
     if (!/^[0-9]{6}$/.test(token)) {
@@ -179,6 +199,9 @@
   });
 
   // ---------- WebSocket ----------
+  // baseUrl http:// vira ws://; https:// vira wss:// (o replace do prefixo
+  // "http" cobre os dois esquemas — página https nunca conecta ws://, que
+  // seria conteúdo misto).
   function wsURL(baseUrl) {
     return baseUrl.replace(/^http/i, "ws") + "/ws";
   }

@@ -6,7 +6,7 @@ import (
 	"io/fs"
 )
 
-//go:embed index.html app.js style.css manifest.webmanifest icon.svg
+//go:embed index.html app.js style.css manifest.webmanifest icon.svg sw.js
 var files embed.FS
 
 // Files devolve o FS embutido (raiz = index.html, app.js, ...).
