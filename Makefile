@@ -1,9 +1,11 @@
 BIN := bin/farchromectl
+VERSION ?= $(shell git describe --tags --always --dirty)
 
 .PHONY: build install test vet run clean
 
 build:
-	CGO_ENABLED=0 go build -o $(BIN) ./cmd/farchromectl
+	@echo "compilando $(BIN) — versão $(VERSION)"
+	CGO_ENABLED=0 go build -ldflags "-X main.version=$(VERSION)" -o $(BIN) ./cmd/farchromectl
 
 install: build
 	install -Dm755 $(BIN) $(HOME)/.local/bin/farchromectl

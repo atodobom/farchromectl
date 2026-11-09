@@ -25,18 +25,21 @@ const (
 
 // Server concentra os handlers HTTP.
 type Server struct {
-	hub    *hub.Hub
-	token  string
-	static http.Handler
+	hub     *hub.Hub
+	token   string
+	version string
+	static  http.Handler
 }
 
-// New cria o servidor. staticFS é o FS embutido da UI (raiz = index.html etc.).
-func New(h *hub.Hub, token string, staticFS fs.FS) *Server {
+// New cria o servidor. version é a versão do binário (reportada no healthz);
+// staticFS é o FS embutido da UI (raiz = index.html etc.).
+func New(h *hub.Hub, token, version string, staticFS fs.FS) *Server {
 	_ = mime.AddExtensionType(".webmanifest", "application/manifest+json")
 	return &Server{
-		hub:    h,
-		token:  token,
-		static: http.FileServerFS(staticFS),
+		hub:     h,
+		token:   token,
+		version: version,
+		static:  http.FileServerFS(staticFS),
 	}
 }
 
@@ -53,7 +56,7 @@ func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Content-Type", "application/json")
-	_, _ = w.Write([]byte(`{"ok":true,"name":"` + Name + `"}`))
+	_, _ = w.Write([]byte(`{"ok":true,"name":"` + Name + `","version":"` + s.version + `"}`))
 }
 
 func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {

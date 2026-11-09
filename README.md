@@ -67,6 +67,7 @@ Opções:
 | `--addr`   | `0.0.0.0:8080`         | endereço/porta de escuta (ex.: `--addr 0.0.0.0:9090`)            |
 | `--token`  | gerado/persistido      | força um token específico (6 dígitos); não altera o arquivo salvo|
 | `--open`   | desligado              | abre a UI no navegador local após iniciar (se houver sessão X11/Wayland) |
+| `--version`| —                      | imprime a versão do binário e sai                                |
 
 ### Token e porta
 
@@ -184,3 +185,16 @@ extension/          extensão Chrome MV3 (sem código remoto)
 Testes: `go test ./...` cobre hub (relay, broadcast, reconexão da extensão),
 config (persistência do token), server (healthz/CORS, rejeição de token,
 fluxo ponta-a-ponta com dial WebSocket real) e mdns (falha benigna).
+
+## Versionamento
+
+- Este projeto segue [SemVer](https://semver.org/lang/pt-BR/):
+  `MAJOR.MINOR.PATCH` — mudanças incompatíveis, funcionalidades novas e
+  correções, nessa ordem.
+- Cada release é marcado com uma **tag anotada**: `git tag -a vX.Y.Z -m "..."`.
+- A versão é **carimbada no binário** no `make build`, a partir do
+  `git describe --tags --always --dirty` (via
+  `-ldflags "-X main.version=…"`).
+- Para conferir a versão de um binário: `./bin/farchromectl --version`
+  (também exposta no `/api/healthz` e no anúncio mDNS).
+- Histórico de mudanças por versão: [CHANGELOG.md](CHANGELOG.md).

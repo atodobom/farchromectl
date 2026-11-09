@@ -16,7 +16,10 @@ import (
 	"github.com/coder/websocket"
 )
 
-const testToken = "123456"
+const (
+	testToken   = "123456"
+	testVersion = "9.9.9-test"
+)
 
 func newTestServer(t *testing.T) *httptest.Server {
 	t.Helper()
@@ -24,7 +27,7 @@ func newTestServer(t *testing.T) *httptest.Server {
 	static := fstest.MapFS{
 		"index.html": &fstest.MapFile{Data: []byte("<!doctype html><title>ui</title>")},
 	}
-	srv := New(h, testToken, static)
+	srv := New(h, testToken, testVersion, static)
 	ts := httptest.NewServer(srv.Handler())
 	t.Cleanup(ts.Close)
 	return ts
@@ -113,14 +116,18 @@ func TestHealthz(t *testing.T) {
 	}
 	body, _ := io.ReadAll(resp.Body)
 	var got struct {
-		OK   bool   `json:"ok"`
-		Name string `json:"name"`
+		OK      bool   `json:"ok"`
+		Name    string `json:"name"`
+		Version string `json:"version"`
 	}
 	if err := json.Unmarshal(body, &got); err != nil {
 		t.Fatalf("body %s: %v", body, err)
 	}
 	if !got.OK || got.Name != Name {
 		t.Fatalf("healthz = %+v", got)
+	}
+	if got.Version != testVersion {
+		t.Fatalf("healthz version = %q, queria %q", got.Version, testVersion)
 	}
 }
 
@@ -241,7 +248,7 @@ func TestWSEndToEnd(t *testing.T) {
 func TestWSRealPortDial(t *testing.T) {
 	h := hub.New()
 	static := fstest.MapFS{"index.html": &fstest.MapFile{Data: []byte("x")}}
-	srv := &http.Server{Handler: New(h, testToken, static).Handler()}
+	srv := &http.Server{Handler: New(h, testToken, testVersion, static).Handler()}
 
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {

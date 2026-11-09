@@ -25,7 +25,10 @@ import (
 	"github.com/antonio/farchromectl/web"
 )
 
-const version = "0.1.0"
+// version é carimbada no build via
+// -ldflags "-X main.version=$(git describe --tags --always --dirty)";
+// sem carimbo, vale "dev".
+var version = "dev"
 
 func main() {
 	log.SetFlags(0)
@@ -34,7 +37,13 @@ func main() {
 	addr := flag.String("addr", "0.0.0.0:8080", "endereço de escuta (host:porta)")
 	tokenFlag := flag.String("token", "", "token de autenticação (padrão: PIN de 6 dígitos gerado na 1ª execução e salvo em ~/.config/farchromectl/)")
 	open := flag.Bool("open", false, "abre a UI no navegador local após iniciar (requer sessão gráfica)")
+	showVersion := flag.Bool("version", false, "imprime a versão do binário e sai")
 	flag.Parse()
+
+	if *showVersion {
+		fmt.Println(versionOutput())
+		os.Exit(0)
+	}
 
 	token, err := resolveToken(*tokenFlag)
 	if err != nil {
@@ -55,7 +64,7 @@ func main() {
 
 	h := hub.New()
 	srv := &http.Server{
-		Handler: server.New(h, token, web.Files()).Handler(),
+		Handler: server.New(h, token, version, web.Files()).Handler(),
 	}
 
 	ln, err := net.Listen("tcp", net.JoinHostPort(host, strconv.Itoa(port)))
@@ -89,6 +98,11 @@ func main() {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	_ = srv.Shutdown(ctx)
+}
+
+// versionOutput é a linha impressa por --version (separada para ser testável).
+func versionOutput() string {
+	return "farchromectl " + version
 }
 
 // resolveToken usa o token da flag quando informado; caso contrário carrega
