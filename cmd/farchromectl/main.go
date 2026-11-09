@@ -7,6 +7,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"net/http"
@@ -17,6 +18,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	qrcode "github.com/skip2/go-qrcode"
 
 	"github.com/antonio/farchromectl/internal/config"
 	"github.com/antonio/farchromectl/internal/hub"
@@ -79,7 +82,12 @@ func main() {
 		defer stop()
 	}
 
-	printBanner(ln, token)
+	printBanner(os.Stdout, bannerData{
+		version: version,
+		token:   token,
+		port:    port,
+		ips:     mdns.NonLoopbackIPs(),
+	}, isTTY(os.Stdout))
 
 	if *open && graphicalSession() {
 		go openBrowser(ln)
@@ -121,32 +129,96 @@ func resolveToken(flagToken string) (string, error) {
 	return cfg.Token, nil
 }
 
-func printBanner(ln net.Listener, token string) {
-	port := ln.Addr().(*net.TCPAddr).Port
+// bannerData concentra o que o banner de startup imprime. Separado da coleta
+// (listener, mDNS, flags) para ser testável sem subir servidor.
+type bannerData struct {
+	version      string
+	token        string
+	port         int
+	tls          bool     // --tls: URLs https + linha do listener loopback
+	loopbackPort int      // porta HTTP loopback da extensão quando tls
+	certDir      string   // diretório do certificado (informativo, tls)
+	ips          []net.IP // IPs não-loopback para as URLs
+}
+
+// scheme é o esquema das URLs impressas.
+func (d bannerData) scheme() string {
+	if d.tls {
+		return "https"
+	}
+	return "http"
+}
+
+// qrURL devolve a URL primária codificada no QR: o primeiro IPv4 não-loopback
+// (o mais útil para o celular). Vazio quando não há IPv4.
+func (d bannerData) qrURL() string {
+	for _, ip := range d.ips {
+		if ip.To4() != nil {
+			return d.scheme() + "://" + net.JoinHostPort(ip.String(), strconv.Itoa(d.port))
+		}
+	}
+	return ""
+}
+
+// printBanner imprime o banner de startup em w. O QR só é impresso quando
+// tty=true: em saída pipe/arquivo os half-blocks são lixo — o log deve ficar
+// limpo. A renderização usa ToSmallString(false) (módulos claros em glyph de
+// primeiro plano), que dá a polaridade correta (escuro-sobre-claro) em
+// terminais com fundo escuro, o caso comum de quem roda servidor no terminal.
+func printBanner(w io.Writer, d bannerData, tty bool) {
 	const W = 42 // largura interna das caixas
 
 	spaced := "f a r c h r o m e c t l"
 	label := "TOKEN (use no celular e na extensão)"
 
-	fmt.Println()
-	fmt.Println("  ╭" + strings.Repeat("─", W) + "╮")
-	fmt.Printf("  │%*s%s%*s│\n", 9, "", spaced, 10, "")
-	fmt.Println("  ╰" + strings.Repeat("─", W) + "╯")
-	fmt.Printf("  versão  : %s\n", version)
-	fmt.Println()
-	fmt.Println("  ╔" + strings.Repeat("═", W) + "╗")
-	fmt.Printf("  ║%*s%s%*s║\n", 3, "", label, 3, "")
-	fmt.Printf("  ║%*s%s%*s║\n", (W-len(token))/2, "", token, (W+1-len(token))/2, "")
-	fmt.Println("  ╚" + strings.Repeat("═", W) + "╝")
-	fmt.Println()
-	fmt.Println("  Abra no celular (mesma rede Wi-Fi):")
-	for _, ip := range mdns.NonLoopbackIPs() {
-		fmt.Printf("    http://%s\n", net.JoinHostPort(ip.String(), strconv.Itoa(port)))
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, "  ╭"+strings.Repeat("─", W)+"╮")
+	fmt.Fprintf(w, "  │%*s%s%*s│\n", 9, "", spaced, 10, "")
+	fmt.Fprintln(w, "  ╰"+strings.Repeat("─", W)+"╯")
+	fmt.Fprintf(w, "  versão  : %s\n", d.version)
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, "  ╔"+strings.Repeat("═", W)+"╗")
+	fmt.Fprintf(w, "  ║%*s%s%*s║\n", 3, "", label, 3, "")
+	fmt.Fprintf(w, "  ║%*s%s%*s║\n", (W-len(d.token))/2, "", d.token, (W+1-len(d.token))/2, "")
+	fmt.Fprintln(w, "  ╚"+strings.Repeat("═", W)+"╝")
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, "  Abra no celular (mesma rede Wi-Fi):")
+	for _, ip := range d.ips {
+		fmt.Fprintf(w, "    %s://%s\n", d.scheme(), net.JoinHostPort(ip.String(), strconv.Itoa(d.port)))
 	}
-	fmt.Printf("    http://%s   (nome mDNS; requer avahi)\n", net.JoinHostPort(mdns.Hostname+".local", strconv.Itoa(port)))
-	fmt.Println()
-	fmt.Printf("  Extensão do Chrome: ws://127.0.0.1:%d/ws (configure o token na página de opções)\n", port)
-	fmt.Println()
+	fmt.Fprintf(w, "    %s://%s   (nome mDNS; requer avahi)\n", d.scheme(), net.JoinHostPort(mdns.Hostname+".local", strconv.Itoa(d.port)))
+	fmt.Fprintln(w)
+	if tty {
+		if url := d.qrURL(); url != "" {
+			qr, err := qrcode.New(url, qrcode.Medium)
+			if err != nil {
+				fmt.Fprintf(w, "  AVISO: QR indisponível (%v); use as URLs acima.\n", err)
+			} else {
+				fmt.Fprintln(w, "  Escaneie com a câmera do celular (abre a UI):")
+				for _, line := range strings.Split(strings.TrimSuffix(qr.ToSmallString(false), "\n"), "\n") {
+					fmt.Fprintln(w, "    "+line)
+				}
+				fmt.Fprintln(w)
+			}
+		}
+	}
+	if d.tls {
+		fmt.Fprintf(w, "  Extensão do Chrome: ws://127.0.0.1:%d/ws  (HTTP só-loopback, porta principal +1 — use esta porta nas opções da extensão)\n", d.loopbackPort)
+		fmt.Fprintf(w, "  TLS: certificado local self-signed em %s (o celular pedirá confiança na 1ª vez — ver README)\n", d.certDir)
+	} else {
+		fmt.Fprintf(w, "  Extensão do Chrome: ws://127.0.0.1:%d/ws (configure o token na página de opções)\n", d.port)
+	}
+	fmt.Fprintln(w)
+}
+
+// isTTY informa se f é um terminal (char device), via Stat — sem dependências
+// extras. Usado para decidir se o QR é impresso.
+func isTTY(f *os.File) bool {
+	st, err := f.Stat()
+	if err != nil {
+		return false
+	}
+	return st.Mode()&os.ModeCharDevice != 0
 }
 
 func graphicalSession() bool {
