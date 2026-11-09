@@ -186,6 +186,23 @@ Testes: `go test ./...` cobre hub (relay, broadcast, reconexão da extensão),
 config (persistência do token), server (healthz/CORS, rejeição de token,
 fluxo ponta-a-ponta com dial WebSocket real) e mdns (falha benigna).
 
+### Teste E2E com Chrome real
+
+```sh
+make e2e
+```
+
+Sobe o servidor em porta de teste com token conhecido, lança um **Chrome
+dedicado** (perfil temporário, headless, porta de debug própria — não toca
+no Chrome/perfil do usuário), instala a **extensão de produção** via CDP
+`Extensions.loadUnpacked` (necessário porque o Chrome 137+ branded ignora
+`--load-extension`), abre uma página com mídia local (vídeo via `ffmpeg`,
+com fallback para `<audio>` com WAV sintetizado em JS) e valida a cadeia
+completa: extensão conecta (`extStatus`), `state` reporta a mídia tocando e
+`pause`/`play`/`seekTo`/`setVolume` refletem no elemento. Requer
+google-chrome/chromium instalado; o play é disparado com clique real via
+CDP (`Input.dispatchMouseEvent`), respeitando a política de autoplay.
+
 ## Versionamento
 
 - Este projeto segue [SemVer](https://semver.org/lang/pt-BR/):
