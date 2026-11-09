@@ -4,6 +4,7 @@ package server
 
 import (
 	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"io/fs"
 	"mime"
@@ -122,7 +123,12 @@ func (s *Server) authenticate(conn *websocket.Conn) (hub.Role, bool) {
 	if role != hub.RoleUI && role != hub.RoleExt {
 		return fail("papel inválido", "papel inválido")
 	}
-	if auth.Token == "" || auth.Token != s.token {
+	if auth.Token == "" {
+		return fail("token inválido", "token inválido")
+	}
+	// comparação em tempo constante (higiene; o PIN tem só 6 dígitos, mas
+	// não custa evitar oráculos de timing no handshake).
+	if subtle.ConstantTimeCompare([]byte(auth.Token), []byte(s.token)) != 1 {
 		return fail("token inválido", "token inválido")
 	}
 
