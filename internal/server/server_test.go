@@ -3,11 +3,13 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"testing/fstest"
 	"time"
@@ -97,6 +99,293 @@ func expectRejected(t *testing.T, baseURL string, authFrame any) {
 	defer cancel()
 	if _, _, err := conn.Read(ctx); err == nil {
 		t.Fatal("conexão deveria ter sido fechada após rejeição")
+	}
+}
+
+// dialFromIP conecta ao /ws vinculando a origem a localIP. Aliases de
+// loopback (127.0.0.x no Linux) permitem simular IPs de origem distintos nos
+// testes de isolamento per-IP.
+func dialFromIP(t *testing.T, baseURL, localIP string) *websocket.Conn {
+	t.Helper()
+	url := "ws" + strings.TrimPrefix(baseURL, "http") + "/ws"
+	dialer := &net.Dialer{LocalAddr: &net.TCPAddr{IP: net.ParseIP(localIP)}}
+	client := &http.Client{Transport: &http.Transport{DialContext: dialer.DialContext}}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	conn, _, err := websocket.Dial(ctx, url, &websocket.DialOptions{HTTPClient: client})
+	if err != nil {
+		t.Fatalf("dial %s a partir de %s: %v", url, localIP, err)
+	}
+	t.Cleanup(func() { _ = conn.CloseNow() })
+	return conn
+}
+
+// expectAuthOK faz o handshake completo com token correto (de localIP, ou da
+// origem padrão se vazia) e exige hello ok:true.
+func expectAuthOK(t *testing.T, baseURL, localIP string) {
+	t.Helper()
+	var conn *websocket.Conn
+	if localIP == "" {
+		conn = dial(t, baseURL)
+	} else {
+		conn = dialFromIP(t, baseURL, localIP)
+	}
+	sendJSON(t, conn, map[string]any{"role": "ui", "token": testToken})
+	var hello struct {
+		Type  string `json:"type"`
+		OK    bool   `json:"ok"`
+		Error string `json:"error"`
+	}
+	recvJSON(t, conn, &hello)
+	if hello.Type != "hello" || !hello.OK {
+		t.Fatalf("esperava hello ok:true, veio %+v", hello)
+	}
+}
+
+var wrongAuth = map[string]any{"role": "ui", "token": "999999"}
+
+// failNTimesFrom dispara n handshakes com token errado a partir de localIP
+// (origem padrão se vazia), cada um rejeitado normalmente ("token inválido").
+func failNTimesFrom(t *testing.T, baseURL, localIP string, n int) {
+	t.Helper()
+	for i := 0; i < n; i++ {
+		if localIP == "" {
+			expectRejected(t, baseURL, wrongAuth)
+		} else {
+			conn := dialFromIP(t, baseURL, localIP)
+			sendJSON(t, conn, wrongAuth)
+			var hello struct {
+				Type  string `json:"type"`
+				OK    bool   `json:"ok"`
+				Error string `json:"error"`
+			}
+			recvJSON(t, conn, &hello)
+			if hello.Type != "hello" || hello.OK {
+				t.Fatalf("esperava rejeição normal (tentativa %d), veio %+v", i+1, hello)
+			}
+		}
+	}
+}
+
+// TestWSLockoutAfterRepeatedFailures: authMaxFailures tokens errados
+// consecutivos do mesmo IP colocam o IP em lockout — a tentativa seguinte é
+// recusada com a mensagem distinta de lockout, sem nem ler o frame de
+// autenticação, e a conexão é fechada.
+func TestWSLockoutAfterRepeatedFailures(t *testing.T) {
+	ts := newTestServer(t)
+
+	// ainda abaixo do limiar: rejeições normais
+	failNTimesFrom(t, ts.URL, "", authMaxFailures-1)
+	// a authMaxFailures-ésima falha dispara o lockout (ainda responde
+	// "token inválido" — é a falha que arma a janela)
+	expectRejected(t, ts.URL, wrongAuth)
+
+	// tentativa seguinte: recusada imediatamente, sem frame de autenticação
+	conn := dial(t, ts.URL)
+	var hello struct {
+		Type  string `json:"type"`
+		OK    bool   `json:"ok"`
+		Error string `json:"error"`
+	}
+	recvJSON(t, conn, &hello)
+	if hello.Type != "hello" || hello.OK {
+		t.Fatalf("esperava hello ok:false em lockout, veio %+v", hello)
+	}
+	if !strings.Contains(hello.Error, "locked") {
+		t.Fatalf("mensagem de lockout deveria ser distinta, veio %q", hello.Error)
+	}
+	// e o servidor fecha a conexão em seguida
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if _, _, err := conn.Read(ctx); err == nil {
+		t.Fatal("conexão deveria ter sido fechada após rejeição por lockout")
+	}
+}
+
+// TestWSLockoutIsPerIP: lockout de um IP não afeta handshakes legítimos de
+// outro IP — o rate-limit é contabilizado por origem.
+func TestWSLockoutIsPerIP(t *testing.T) {
+	ts := newTestServer(t)
+
+	// trava o IP padrão (127.0.0.1)
+	failNTimesFrom(t, ts.URL, "", authMaxFailures)
+
+	// durante a janela de lockout de 127.0.0.1, outro IP autentica normalmente
+	expectAuthOK(t, ts.URL, "127.0.0.2")
+}
+
+// TestWSLockoutCounterResetsOnSuccess: um handshake bem-sucedido zera a
+// contagem do IP. Após 4 falhas + 1 sucesso + 4 falhas (8 falhas totais, mas
+// nenhuma sequência de authMaxFailures), um token correto ainda é aceito —
+// sem o reset, a 5ª falha acumulada teria travado o IP.
+func TestWSLockoutCounterResetsOnSuccess(t *testing.T) {
+	ts := newTestServer(t)
+
+	failNTimesFrom(t, ts.URL, "", authMaxFailures-1)
+	expectAuthOK(t, ts.URL, "") // sucesso limpa o estado do IP
+	failNTimesFrom(t, ts.URL, "", authMaxFailures-1)
+	expectAuthOK(t, ts.URL, "") // prova que não houve lockout
+}
+
+// ---------- unit tests do authLimiter (relógio falso) ----------
+
+// newFrozenLimiter devolve um limiter cujo relógio é a variável cur (mutável
+// pelo teste para avançar o tempo).
+func newFrozenLimiter(start time.Time) (*authLimiter, *time.Time) {
+	cur := start
+	l := newAuthLimiter()
+	l.now = func() time.Time { return cur }
+	return l, &cur
+}
+
+// TestAuthLimiterSweepRemovesIdleEntries: entradas ociosas além do TTL são
+// varridas na falha seguinte — o mapa não cresce sem limite.
+func TestAuthLimiterSweepRemovesIdleEntries(t *testing.T) {
+	start := time.Now()
+	l, cur := newFrozenLimiter(start)
+
+	for i := 1; i <= 3; i++ {
+		l.recordFailure(fmt.Sprintf("10.0.0.%d", i))
+	}
+	if len(l.m) != 3 {
+		t.Fatalf("mapa = %d entradas, queria 3", len(l.m))
+	}
+
+	// avança além do TTL; uma nova falha (de outro IP) dispara o sweep
+	*cur = start.Add(authFailureTTL + time.Minute)
+	l.recordFailure("__VG_IPV4_f1d91407a68e__")
+	for _, ip := range []string{"__VG_IPV4_11b2e3a0f955__", "__VG_IPV4_1282f0dc3895__", "10.0.0.1"} {
+		if _, ok := l.m[ip]; ok {
+			t.Fatalf("entrada ociosa %s deveria ter sido varrida", ip)
+		}
+	}
+	if len(l.m) != 1 {
+		t.Fatalf("mapa = %d entradas após sweep, queria só a ativa", len(l.m))
+	}
+}
+
+// TestAuthLimiterStreakDecaysAfterTTL: um IP ocioso além do TTL esquece a
+// streak (a entrada é varrida e recomeça do zero) — falhas antigas não
+// acumulam para travar o IP depois.
+func TestAuthLimiterStreakDecaysAfterTTL(t *testing.T) {
+	start := time.Now()
+	l, cur := newFrozenLimiter(start)
+	const ip = "10.2.0.1"
+
+	for i := 0; i < authMaxFailures-1; i++ {
+		l.recordFailure(ip)
+	}
+	// silêncio além do TTL, então 1 falha: a entrada antiga foi varrida e a
+	// streak recomeçou em 1 — não trava.
+	*cur = start.Add(authFailureTTL + time.Minute)
+	if l.recordFailure(ip) {
+		t.Fatal("streak antiga deveria ter decaído (sweep); não era para travar")
+	}
+	// agora é preciso o orçamento completo de falhas consecutivas para travar
+	for i := 0; i < authMaxFailures-2; i++ {
+		if l.recordFailure(ip) {
+			t.Fatalf("travou antes do limiar (falha consecutiva %d)", i+2)
+		}
+	}
+	if !l.recordFailure(ip) {
+		t.Fatal("alcançado o limiar de falhas consecutivas, deveria travar")
+	}
+	if !l.locked(ip) {
+		t.Fatal("IP deveria estar em lockout")
+	}
+}
+
+// TestAuthLimiterWindowExpiresAndIsNotExtended: a janela de lockout expira
+// sozinha e consultas (tentativas recusadas) durante a janela não a renovam —
+// as reconexões automáticas da extensão não podem perpetuar o lockout.
+func TestAuthLimiterWindowExpiresAndIsNotExtended(t *testing.T) {
+	start := time.Now()
+	l, cur := newFrozenLimiter(start)
+	const ip = "10.3.0.1"
+
+	for i := 0; i < authMaxFailures; i++ {
+		l.recordFailure(ip)
+	}
+	if !l.locked(ip) {
+		t.Fatal("IP deveria estar em lockout")
+	}
+
+	// rajada de tentativas recusadas no meio da janela
+	for i := 0; i < 20; i++ {
+		l.locked(ip)
+	}
+	if got := l.m[ip].lockedUntil; !got.Equal(start.Add(authLockoutWindow)) {
+		t.Fatalf("janela foi renovada por consultas: lockedUntil = %v, queria %v", got, start.Add(authLockoutWindow))
+	}
+
+	*cur = start.Add(authLockoutWindow + time.Second)
+	if l.locked(ip) {
+		t.Fatal("janela deveria ter expirado")
+	}
+}
+
+// TestAuthLimiterSuccessClearsEntry: recordSuccess remove o estado do IP.
+func TestAuthLimiterSuccessClearsEntry(t *testing.T) {
+	l, _ := newFrozenLimiter(time.Now())
+	const ip = "10.4.0.1"
+
+	l.recordFailure(ip)
+	if len(l.m) != 1 {
+		t.Fatal("entrada deveria existir após falha")
+	}
+	l.recordSuccess(ip)
+	if len(l.m) != 0 {
+		t.Fatal("sucesso deveria remover a entrada do IP")
+	}
+}
+
+// TestAuthLimiterConcurrentAccess: exercita o limiter de várias goroutines
+// (IPs distintos e um IP compartilhado) para o race detector validar o lock.
+func TestAuthLimiterConcurrentAccess(t *testing.T) {
+	l := newAuthLimiter() // relógio real
+
+	var wg sync.WaitGroup
+	for g := 0; g < 8; g++ {
+		wg.Add(1)
+		go func(g int) {
+			defer wg.Done()
+			ip := fmt.Sprintf("10.5.%d.1", g+1)
+			for i := 0; i < 50; i++ {
+				l.recordFailure(ip)
+				l.locked(ip)
+				if i%10 == 0 {
+					l.recordSuccess(ip)
+				}
+			}
+		}(g)
+	}
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 200; i++ {
+			l.recordFailure("__VG_IPV4_731af1cf040e__")
+			l.locked("__VG_IPV4_731af1cf040e__")
+		}
+	}()
+	wg.Wait()
+
+	if got := len(l.m); got > 9 {
+		t.Fatalf("mapa = %d entradas, queria ≤ 9 (um por IP usado)", got)
+	}
+}
+
+// TestRemoteIP: extração de IP a partir de RemoteAddr (IPv4, IPv6 e formato
+// sem porta).
+func TestRemoteIP(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"__VG_IPV4_0dd7f56680fd__:54321", "__VG_IPV4_0dd7f56680fd__"},
+		{"[::1]:54321", "::1"},
+		{"sem-porta", "sem-porta"},
+	}
+	for _, c := range cases {
+		if got := remoteIP(c.in); got != c.want {
+			t.Errorf("remoteIP(%q) = %q, queria %q", c.in, got, c.want)
+		}
 	}
 }
 
