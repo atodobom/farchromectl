@@ -6,7 +6,18 @@
 // cliente "ui": extensão conecta (extStatus), state reporta mídia tocando e
 // comandos pause/play/seekTo/setVolume refletem no elemento via CDP.
 //
-// Uso: make e2e  (ou: go run ./e2e -bin bin/farchromectl)
+// Uso: make e2e         (ou: go run ./e2e -bin bin/farchromectl)
+//
+//	make e2e-tls     (ou: go run ./e2e -bin bin/farchromectl -tls)
+//
+// Modo -tls: o servidor roda com --tls (HTTPS no endereço principal, cert
+// self-signed isolado em XDG_CONFIG_HOME temporário — o ~/.config do usuário
+// não é tocado); o lado Go verifica o TLS de verdade contra esse cert (sem
+// InsecureSkipVerify); o Chrome recebe --ignore-certificate-errors e valida
+// na prática: UI servida por https em contexto seguro, UI do navegador
+// autenticando por wss, service worker pronto (navigator.serviceWorker.ready)
+// e a extensão conectando pelo listener HTTP loopback (porta principal +1) —
+// a cadeia completa de comandos roda igual ao modo plano.
 //
 // O Chrome diário do usuário não é tocado: instância própria, user-data-dir
 // temporário e porta de debug distinta; nada é persistido do lado do Chrome.
@@ -14,9 +25,12 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"os"
@@ -28,6 +42,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/coder/websocket"
 )
 
 var start = time.Now()
@@ -52,6 +68,7 @@ func run() error {
 	extFlag := flag.String("extension", "", "diretório da extensão (padrão: ../extension relativo a este fonte)")
 	tokenFlag := flag.String("token", "424242", "token de teste (6 dígitos)")
 	mediaFlag := flag.String("media", "auto", "mídia de teste: auto (ffmpeg→vídeo, senão WAV), video ou wav")
+	tlsFlag := flag.Bool("tls", false, "modo TLS: servidor com --tls (HTTPS no endereço principal), Chrome com --ignore-certificate-errors, UI via https/wss e extensão via listener HTTP loopback (porta principal +1)")
 	timeoutFlag := flag.Duration("timeout", 120*time.Second, "tempo total máximo do harness")
 	headlessFlag := flag.Bool("headless", true, "headless=new (false = headed, para depuração)")
 	keepFlag := flag.Bool("keep", false, "não remove os diretórios temporários ao final (depuração)")
@@ -83,7 +100,7 @@ func run() error {
 		return fmt.Errorf("binário %s não encontrado (rode make build): %v", *binFlag, err)
 	}
 
-	serverPort, cdpPort, mediaPort, err := freePorts(3)
+	serverPort, cdpPort, mediaPort, err := freePorts()
 	if err != nil {
 		return err
 	}
@@ -143,7 +160,29 @@ func run() error {
 	logf("pagina de midia: %s", mediaURL)
 
 	// ---------- servidor farchromectl ----------
-	serverCmd := exec.Command(*binFlag, "--addr", net.JoinHostPort("127.0.0.1", strconv.Itoa(serverPort)), "--token", *tokenFlag)
+	// No modo -tls: o servidor recebe --tls; a extensão é configurada com a
+	// porta loopback (porta principal +1) e o certificado é gerado sob
+	// XDG_CONFIG_HOME temporário — o ~/.config do usuário não é tocado e o
+	// harness pode ler o cert para VERIFICAR o HTTPS de verdade (sem
+	// InsecureSkipVerify no lado Go).
+	scheme := "http"
+	extPort := serverPort // porta que a extensão usa nas opções
+	certPath := ""
+	serverArgs := []string{
+		"--addr", net.JoinHostPort("127.0.0.1", strconv.Itoa(serverPort)),
+		"--token", *tokenFlag,
+	}
+	var tlsClient *http.Client
+	if *tlsFlag {
+		scheme = "https"
+		extPort = serverPort + 1
+		certPath = filepath.Join(tmpDir, "config", "farchromectl", "cert.pem")
+		serverArgs = append(serverArgs, "--tls")
+	}
+	serverCmd := exec.Command(*binFlag, serverArgs...)
+	if *tlsFlag {
+		serverCmd.Env = append(os.Environ(), "XDG_CONFIG_HOME="+filepath.Join(tmpDir, "config"))
+	}
 	serverCmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	sl, err := os.Create(serverLog)
 	if err != nil {
@@ -156,12 +195,39 @@ func run() error {
 	}
 	serverProc := serverCmd.Process
 	cleanup.add(func() { killProcess(serverProc, serverCmd, sl) })
-	logf("servidor: %s --addr 127.0.0.1:%d --token %s (log: %s)", *binFlag, serverPort, *tokenFlag, serverLog)
+	logf("servidor: %s %s (log: %s)", *binFlag, strings.Join(serverArgs, " "), serverLog)
 
-	if err := waitHealthz(ctx, serverPort, serverCmd); err != nil {
+	if *tlsFlag {
+		// o certificado é gerado ANTES do listener subir: esperar o arquivo
+		// existir e montar o cliente HTTPS verificado contra ele.
+		if err := waitCert(ctx, certPath, serverCmd); err != nil {
+			return fmt.Errorf("%v\n--- server.log ---\n%s", err, readFileTail(serverLog, 2000))
+		}
+		certPEM, err := os.ReadFile(certPath)
+		if err != nil {
+			return err
+		}
+		pool := x509.NewCertPool()
+		if !pool.AppendCertsFromPEM(certPEM) {
+			return fmt.Errorf("cert de teste %s não parseia", certPath)
+		}
+		tlsClient = &http.Client{Transport: &http.Transport{
+			TLSClientConfig: &tls.Config{RootCAs: pool, ServerName: "127.0.0.1"},
+		}}
+		logf("certificado de teste verificado (SAN 127.0.0.1): %s", certPath)
+	}
+
+	healthzURL := fmt.Sprintf("%s://127.0.0.1:%d/api/healthz", scheme, serverPort)
+	if err := waitHealthz(ctx, healthzURL, tlsClient, serverCmd); err != nil {
 		return fmt.Errorf("%v\n--- server.log ---\n%s", err, readFileTail(serverLog, 2000))
 	}
-	logf("servidor respondeu /api/healthz")
+	logf("servidor respondeu /api/healthz (%s)", scheme)
+
+	// banner no log (saída não-TTY): sem QR (half-blocks) e com o esquema certo
+	if err := checkBannerLog(serverLog, scheme, extPort); err != nil {
+		return err
+	}
+	logf("banner no server.log: URLs %s, sem QR (saída não é TTY) — ok", scheme)
 
 	// ---------- Chrome dedicado ----------
 	chromeArgs := []string{
@@ -173,6 +239,11 @@ func run() error {
 		"--mute-audio",
 		"--hide-scrollbars",
 		"--window-size=900,700",
+	}
+	if *tlsFlag {
+		// certificado self-signed: o Chrome de teste ignora o erro para
+		// carregar a página https (o lado Go verifica de verdade, acima)
+		chromeArgs = append(chromeArgs, "--ignore-certificate-errors")
 	}
 	if *headlessFlag {
 		chromeArgs = append([]string{"--headless=new"}, chromeArgs...)
@@ -208,12 +279,20 @@ func run() error {
 	logf("extensao carregada via CDP: id=%s", extID)
 
 	// ---------- cliente ui ----------
-	ui, err := dialUI(ctx, fmt.Sprintf("ws://127.0.0.1:%d/ws", serverPort), *tokenFlag, *verboseFlag)
+	// tls: wss:// no listener principal, com TLS VERIFICADO contra o cert
+	// de teste; senão ws:// como antes.
+	uiURL := fmt.Sprintf("ws://127.0.0.1:%d/ws", serverPort)
+	var dialOpts *websocket.DialOptions
+	if *tlsFlag {
+		uiURL = fmt.Sprintf("wss://127.0.0.1:%d/ws", serverPort)
+		dialOpts = &websocket.DialOptions{HTTPClient: tlsClient}
+	}
+	ui, err := dialUI(ctx, uiURL, *tokenFlag, *verboseFlag, dialOpts)
 	if err != nil {
 		return err
 	}
 	cleanup.add(ui.close)
-	logf("cliente ui autenticado em ws://127.0.0.1:%d/ws", serverPort)
+	logf("cliente ui autenticado em %s", uiURL)
 
 	// ---------- configuração da extensão pela página de opções ----------
 	optTab, err := browser.newTab(ctx, "chrome-extension://"+extID+"/options.html")
@@ -235,7 +314,7 @@ func run() error {
 		document.getElementById("opt-port").value = %q;
 		document.getElementById("opt-token").value = %q;
 		document.getElementById("opt-save").click();
-	})()`, strconv.Itoa(serverPort), *tokenFlag)
+	})()`, strconv.Itoa(extPort), *tokenFlag)
 	if _, err := optConn.eval(ctx, configureExpr); err != nil {
 		return fmt.Errorf("falha ao configurar opções: %w", err)
 	}
@@ -251,7 +330,7 @@ func run() error {
 	if !strings.Contains(status, "Salvo") {
 		return fmt.Errorf("página de opções não confirmou o salvamento: status=%q", status)
 	}
-	logf("opções da extensão configuradas (porta=%d token=%s): %q", serverPort, *tokenFlag, status)
+	logf("opções da extensão configuradas (porta=%d token=%s): %q", extPort, *tokenFlag, status)
 
 	// ---------- asserções ----------
 	step := func(name string, fn func() error) error {
@@ -268,6 +347,87 @@ func run() error {
 		return ui.waitExtStatus(ctx, true, 15*time.Second)
 	}); err != nil {
 		return err
+	}
+
+	// ---------- asserções exclusivas do modo -tls (lado navegador) ----------
+	if *tlsFlag {
+		uiBase := fmt.Sprintf("%s://127.0.0.1:%d", scheme, serverPort)
+
+		// (tls-a) UI servida por HTTPS e em contexto seguro (pré-condição
+		// para service worker/install de PWA)
+		uiTab, err := browser.newTab(ctx, uiBase+"/")
+		if err != nil {
+			return err
+		}
+		uiPage, err := dialCDP(ctx, uiTab.WS)
+		if err != nil {
+			return err
+		}
+		cleanup.add(uiPage.close)
+		if err := step("UI servida sobre HTTPS em contexto seguro", func() error {
+			// gate por conteúdo (título da UI), não só readyState: a aba
+			// nasce em about:blank, que também tem readyState "complete"
+			if err := uiPage.waitForExpr(ctx,
+				`document.readyState === "complete" && document.title === "farchromectl"`,
+				10*time.Second); err != nil {
+				return err
+			}
+			for _, expr := range []string{
+				`location.protocol === "https:"`,
+				`window.isSecureContext === true`,
+			} {
+				val, err := uiPage.eval(ctx, expr)
+				if err != nil {
+					return fmt.Errorf("%s: %w", expr, err)
+				}
+				if ok, _ := val.(bool); !ok {
+					return fmt.Errorf("asserção falhou: %s", expr)
+				}
+			}
+			return nil
+		}); err != nil {
+			return err
+		}
+
+		// (tls-b) a UI do NAVEGADOR conecta de verdade: formulário de conexão
+		// preenchido via CDP (perfil limpo não tem credenciais), play/pause
+		// dos indicadores dot-server (wss autenticado) e dot-ext (extensão
+		// conectada via listener loopback, vista pelo hub TLS).
+		if err := step("UI do navegador conecta via wss (dot-server e dot-ext acesos)", func() error {
+			if err := uiPage.waitForExpr(ctx,
+				`!document.getElementById("connect-form").hidden && !!document.getElementById("f-token")`,
+				10*time.Second); err != nil {
+				return fmt.Errorf("formulário de conexão não apareceu: %w", err)
+			}
+			fillExpr := fmt.Sprintf(`(function(){
+				document.getElementById("f-url").value = %q;
+				document.getElementById("f-token").value = %q;
+				document.querySelector("#connect-form button[type=submit]").click();
+			})()`, uiBase, *tokenFlag)
+			if _, err := uiPage.eval(ctx, fillExpr); err != nil {
+				return fmt.Errorf("falha ao preencher formulário da UI: %w", err)
+			}
+			return uiPage.waitForExpr(ctx,
+				`document.getElementById("dot-server").classList.contains("on") && document.getElementById("dot-ext").classList.contains("on")`,
+				15*time.Second)
+		}); err != nil {
+			return err
+		}
+		logf("navegador: UI autenticada por wss e extensao visível (dots verdes)")
+
+		// (tls-c) service worker registra e fica pronto sobre HTTPS
+		if err := step("service worker registra e fica pronto (navigator.serviceWorker.ready)", func() error {
+			expr := `(function(){
+				if (window.__swReady) return true;
+				if (navigator.serviceWorker) {
+					navigator.serviceWorker.ready.then(function () { window.__swReady = true; }).catch(function () {});
+				}
+				return false;
+			})()`
+			return uiPage.waitForExpr(ctx, expr, 20*time.Second)
+		}); err != nil {
+			return err
+		}
 	}
 
 	// ---------- página com mídia ----------
@@ -508,35 +668,117 @@ func defaultExtensionDir() string {
 	return filepath.Join(filepath.Dir(file), "..", "extension")
 }
 
-// freePorts devolve n portas TCP livres em 127.0.0.1.
-func freePorts(n int) (int, int, int, error) {
-	if n != 3 {
-		return 0, 0, 0, fmt.Errorf("freePorts: implementado para 3 portas")
-	}
-	var ports [3]int
-	for i := range ports {
-		ln, err := net.Listen("tcp", "127.0.0.1:0")
+// freePorts devolve portas TCP livres em 127.0.0.1 para o harness. A porta
+// do servidor vem com a garantia extra de que a sucessora (porta+1) também
+// está livre: no modo -tls o servidor usa porta+1 como listener HTTP
+// loopback da extensão.
+func freePorts() (serverPort, cdpPort, mediaPort int, err error) {
+	for i := 0; i < 100; i++ {
+		p, err := freePort()
 		if err != nil {
 			return 0, 0, 0, err
 		}
-		ports[i] = ln.Addr().(*net.TCPAddr).Port
-		ln.Close()
+		if !portFree(p + 1) {
+			continue
+		}
+		cdp, err := freePort()
+		if err != nil {
+			return 0, 0, 0, err
+		}
+		media, err := freePort()
+		if err != nil {
+			return 0, 0, 0, err
+		}
+		used := map[int]bool{p: true, p + 1: true}
+		if used[cdp] || used[media] || cdp == media {
+			continue
+		}
+		return p, cdp, media, nil
 	}
-	return ports[0], ports[1], ports[2], nil
+	return 0, 0, 0, errors.New("não achei conjunto de portas livres (servidor com sucessora, cdp e media)")
 }
 
-// waitHealthz espera o /api/healthz do servidor responder, vigiando o processo.
-func waitHealthz(ctx context.Context, port int, cmd *exec.Cmd) error {
-	url := fmt.Sprintf("http://127.0.0.1:%d/api/healthz", port)
+// freePort devolve uma porta TCP livre em 127.0.0.1.
+func freePort() (int, error) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		return 0, err
+	}
+	defer ln.Close()
+	return ln.Addr().(*net.TCPAddr).Port, nil
+}
+
+// portFree informa se a porta está livre em 127.0.0.1.
+func portFree(p int) bool {
+	ln, err := net.Listen("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(p)))
+	if err != nil {
+		return false
+	}
+	ln.Close()
+	return true
+}
+
+// waitCert espera o certificado de teste existir (o servidor o grava antes
+// de subir o listener), vigiando o processo.
+func waitCert(ctx context.Context, certPath string, cmd *exec.Cmd) error {
 	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
 		if !processAlive(cmd.Process) {
 			return fmt.Errorf("processo do servidor morreu durante o startup")
 		}
-		resp, err := http.Get(url) //nolint:gosec // porta local de teste
+		if _, err := os.Stat(certPath); err == nil {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(100 * time.Millisecond):
+		}
+	}
+	return fmt.Errorf("certificado %s não apareceu em 10s", certPath)
+}
+
+// checkBannerLog valida o banner do servidor no log (saída não-TTY): URLs no
+// esquema esperado, linha da extensão na porta certa e NENHUM QR (o QR só
+// sai quando stdout é terminal — pipe/arquivo fica limpo).
+func checkBannerLog(serverLog, scheme string, extPort int) error {
+	raw, err := os.ReadFile(serverLog)
+	if err != nil {
+		return err
+	}
+	log := string(raw)
+	if !strings.Contains(log, scheme+"://") {
+		return fmt.Errorf("banner sem URLs %s:// (log: %.300s)", scheme, log)
+	}
+	want := fmt.Sprintf("ws://127.0.0.1:%d/ws", extPort)
+	if !strings.Contains(log, want) {
+		return fmt.Errorf("banner sem a linha da extensão %q", want)
+	}
+	for _, block := range []string{"█", "▀", "▄"} {
+		if strings.Contains(log, block) {
+			return fmt.Errorf("banner imprime QR (%q) em saída não-TTY — gating quebrado", block)
+		}
+	}
+	return nil
+}
+
+// waitHealthz espera o /api/healthz do servidor responder com corpo válido,
+// vigiando o processo. client nil → HTTP puro (default); não-nil → cliente
+// HTTPS já configurado para verificar o certificado de teste.
+func waitHealthz(ctx context.Context, url string, client *http.Client, cmd *exec.Cmd) error {
+	if client == nil {
+		client = http.DefaultClient
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		if !processAlive(cmd.Process) {
+			return fmt.Errorf("processo do servidor morreu durante o startup")
+		}
+		resp, err := client.Get(url) //nolint:gosec // porta local de teste
 		if err == nil {
+			body, _ := io.ReadAll(resp.Body)
 			resp.Body.Close()
-			if resp.StatusCode == http.StatusOK {
+			if resp.StatusCode == http.StatusOK && strings.Contains(string(body), `"name":"farchromectl"`) {
 				return nil
 			}
 		}

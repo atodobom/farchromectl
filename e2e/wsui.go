@@ -53,8 +53,9 @@ type uiClient struct {
 }
 
 // dialUI conecta ao /ws, autentica {role:"ui",token} e valida o hello.
-func dialUI(ctx context.Context, url, token string, verbose bool) (*uiClient, error) {
-	conn, _, err := websocket.Dial(ctx, url, nil)
+// opts permite injetar o cliente HTTPS verificado no modo -tls (wss).
+func dialUI(ctx context.Context, url, token string, verbose bool, opts *websocket.DialOptions) (*uiClient, error) {
+	conn, _, err := websocket.Dial(ctx, url, opts)
 	if err != nil {
 		return nil, err
 	}

@@ -1,4 +1,5 @@
 {
+  "id": "/",
   "name": "farchromectl",
   "short_name": "farchromectl",
   "description": "Controle mídias do Chrome a partir do celular.",
