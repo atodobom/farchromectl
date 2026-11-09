@@ -462,6 +462,28 @@ func TestWSRejectsNoAuthFrame(t *testing.T) {
 	}
 }
 
+// recvUntil lê frames de conn até um deles casar com want (no máximo 10
+// frames; recvJSON já falha por timeout se nada chegar). Frames intermediários
+// são descartados.
+//
+// Necessário porque a ordem entre o snapshot de registro de um ui
+// (extStatus do momento do registro) e broadcasts concorrentes do hub não é
+// contratada: se o goroutine do ui registrar antes do Register do ext
+// completar, o ui vê extStatus false e em seguida o broadcast true. O
+// contrato real — testado aqui — é entrega eventual, não a ordem exata.
+func recvUntil(t *testing.T, conn *websocket.Conn, want func(m map[string]any) bool, what string) map[string]any {
+	t.Helper()
+	for i := 0; i < 10; i++ {
+		var m map[string]any
+		recvJSON(t, conn, &m)
+		if want(m) {
+			return m
+		}
+	}
+	t.Fatalf("frame esperado (%s) não chegou em até 10 frames", what)
+	return nil
+}
+
 func TestWSEndToEnd(t *testing.T) {
 	ts := newTestServer(t)
 
@@ -477,7 +499,8 @@ func TestWSEndToEnd(t *testing.T) {
 		t.Fatalf("ext não autenticou: %+v", extHello)
 	}
 
-	// ui conecta e deve receber hello ok + extStatus true
+	// ui conecta e deve receber hello ok + extStatus true (entrega eventual —
+	// ver recvUntil)
 	ui := dial(t, ts.URL)
 	sendJSON(t, ui, map[string]any{"role": "ui", "token": testToken})
 	var uiHello struct {
@@ -488,14 +511,9 @@ func TestWSEndToEnd(t *testing.T) {
 	if !uiHello.OK {
 		t.Fatalf("ui não autenticou: %+v", uiHello)
 	}
-	var extStatus struct {
-		Type      string `json:"type"`
-		Connected bool   `json:"connected"`
-	}
-	recvJSON(t, ui, &extStatus)
-	if extStatus.Type != "extStatus" || !extStatus.Connected {
-		t.Fatalf("ui esperava extStatus true, veio %+v", extStatus)
-	}
+	recvUntil(t, ui, func(m map[string]any) bool {
+		return m["type"] == "extStatus" && m["connected"] == true
+	}, "extStatus connected=true")
 
 	// ui -> ext: comando repassado intacto
 	cmd := map[string]any{"type": "cmd", "cmd": "seekTo", "value": 42.5, "tabId": 7}
@@ -506,29 +524,26 @@ func TestWSEndToEnd(t *testing.T) {
 		t.Fatalf("cmd não chegou intacto ao ext: %v", gotCmd)
 	}
 
-	// ext -> ui: estado broadcast
+	// ext -> ui: estado broadcast (podem ainda existir extStatus pendentes
+	// da corrida de registro — recvUntil descarta)
 	state := map[string]any{
 		"type":        "state",
 		"tabs":        []any{map[string]any{"tabId": 7, "title": "música", "playing": true, "position": 10, "duration": 200}},
 		"activeTabId": 7,
 	}
 	sendJSON(t, ext, state)
-	var gotState map[string]any
-	recvJSON(t, ui, &gotState)
+	gotState := recvUntil(t, ui, func(m map[string]any) bool {
+		return m["type"] == "state"
+	}, "state")
 	if gotState["type"] != "state" {
 		t.Fatalf("state não chegou ao ui: %v", gotState)
 	}
 
-	// ext desconecta: ui é notificado
+	// ext desconecta: ui é notificado (entrega eventual)
 	_ = ext.CloseNow()
-	var disconnected struct {
-		Type      string `json:"type"`
-		Connected bool   `json:"connected"`
-	}
-	recvJSON(t, ui, &disconnected)
-	if disconnected.Type != "extStatus" || disconnected.Connected {
-		t.Fatalf("ui esperava extStatus false, veio %+v", disconnected)
-	}
+	recvUntil(t, ui, func(m map[string]any) bool {
+		return m["type"] == "extStatus" && m["connected"] == false
+	}, "extStatus connected=false")
 }
 
 // TestWSRealPortDial garante que o dial funciona contra um listener TCP real
