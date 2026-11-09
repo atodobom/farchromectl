@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#0f1115">
+  <title>farchromectl</title>
+  <link rel="manifest" href="/manifest.webmanifest">
+  <link rel="icon" href="/icon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <!-- ===== Tela de conexão ===== -->
+  <section id="connect" class="screen">
+    <h1 class="logo">farchromectl</h1>
+    <p id="connect-status" class="status-line">Procurando servidor na rede…</p>
+
+    <form id="connect-form" hidden>
+      <label for="f-url">Endereço do servidor</label>
+      <input id="f-url" type="url" inputmode="url" autocapitalize="off" spellcheck="false"
+             placeholder="http://192.168.0.10:8080" required>
+
+      <label for="f-token">Token (PIN de 6 dígitos)</label>
+      <input id="f-token" type="text" inputmode="numeric" autocomplete="off"
+             placeholder="123456" maxlength="6" required>
+
+      <p id="connect-hint" class="hint" hidden></p>
+      <button type="submit" class="btn btn-primary btn-big">Conectar</button>
+    </form>
+  </section>
+
+  <!-- ===== Controle ===== -->
+  <main id="main" class="screen" hidden>
+    <header class="topbar">
+      <span class="brand">farchromectl</span>
+      <span class="dots">
+        <span id="dot-server" class="dot" title="Servidor"></span>
+        <span id="dot-ext" class="dot" title="Extensão"></span>
+        <button id="btn-settings" class="icon-btn" title="Ajustes" aria-label="Ajustes">⚙</button>
+      </span>
+    </header>
+
+    <div id="banner-ext" class="banner" hidden>Extensão desconectada — abra o Chrome no computador.</div>
+    <div id="toast" class="toast" hidden></div>
+
+    <section class="now">
+      <p id="np-title" class="np-title">Nada tocando</p>
+      <p id="np-state" class="np-state">—</p>
+      <div class="scrub">
+        <span id="pos">0:00</span>
+        <input id="scrub" type="range" min="0" max="1000" value="0" step="1" aria-label="Posição">
+        <span id="dur">0:00</span>
+      </div>
+    </section>
+
+    <section class="target" id="target-row" hidden>
+      <label for="target">Aba ativa</label>
+      <select id="target"></select>
+    </section>
+
+    <section class="controls">
+      <div class="row row-seek">
+        <button id="btn-back" class="btn btn-round" aria-label="Voltar 10 segundos">−10s</button>
+        <button id="btn-toggle" class="btn btn-round btn-primary btn-toggle" aria-label="Reproduzir ou pausar">▶</button>
+        <button id="btn-fwd" class="btn btn-round" aria-label="Avançar 10 segundos">+10s</button>
+      </div>
+      <div class="row row-aux">
+        <button id="btn-mute" class="btn btn-small" aria-label="Silenciar">🔇</button>
+        <input id="volume" type="range" min="0" max="100" value="100" step="1" aria-label="Volume">
+        <button id="btn-speed" class="btn btn-small" aria-label="Velocidade de reprodução">1×</button>
+      </div>
+    </section>
+  </main>
+
+  <!-- ===== Ajustes ===== -->
+  <dialog id="settings">
+    <h2>Ajustes</h2>
+    <p class="hint" id="settings-info"></p>
+    <div class="dialog-actions">
+      <button id="btn-forget" class="btn btn-danger">Esquecer credenciais</button>
+      <button id="btn-close-settings" class="btn">Fechar</button>
+    </div>
+  </dialog>
+
+  <script src="/app.js"></script>
+</body>
+</html>

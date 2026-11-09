@@ -1,0 +1,248 @@
+/* farchromectl — UI mobile-first, tema escuro, alvos de toque grandes. */
+
+:root {
+  --bg: #0f1115;
+  --surface: #171a21;
+  --surface-2: #1f2430;
+  --border: #2a3040;
+  --text: #e8eaf0;
+  --muted: #8b93a7;
+  --accent: #4f8cff;
+  --accent-press: #3a6fd8;
+  --ok: #37c978;
+  --danger: #e05260;
+  --radius: 14px;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  padding: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  height: 100%;
+  overscroll-behavior: none;
+}
+
+body {
+  display: flex;
+  flex-direction: column;
+  max-width: 520px;
+  margin: 0 auto;
+  padding: 0 16px calc(16px + env(safe-area-inset-bottom));
+}
+
+.screen { flex: 1; display: flex; flex-direction: column; }
+
+h1.logo {
+  text-align: center;
+  font-size: 1.6rem;
+  letter-spacing: 0.06em;
+  margin: 2.5rem 0 0.5rem;
+  color: var(--accent);
+}
+
+.status-line {
+  text-align: center;
+  color: var(--muted);
+  min-height: 1.5em;
+  margin: 0.25rem 0 1rem;
+}
+
+/* ===== Formulário de conexão ===== */
+form {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 20px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+
+label {
+  color: var(--muted);
+  font-size: 0.85rem;
+  margin-top: 8px;
+}
+
+input[type="url"], input[type="text"], select {
+  width: 100%;
+  padding: 14px;
+  font-size: 1rem;
+  color: var(--text);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  outline: none;
+}
+input:focus, select:focus { border-color: var(--accent); }
+
+.hint { color: var(--muted); font-size: 0.85rem; }
+.hint-error { color: var(--danger); }
+
+/* ===== Botões ===== */
+.btn {
+  min-height: 52px;
+  padding: 12px 20px;
+  font-size: 1rem;
+  color: var(--text);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  cursor: pointer;
+  transition: background 0.15s, transform 0.05s;
+  -webkit-tap-highlight-color: transparent;
+  user-select: none;
+}
+.btn:active { transform: scale(0.97); }
+.btn:disabled { opacity: 0.45; }
+
+.btn-primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+.btn-primary:active { background: var(--accent-press); }
+
+.btn-big { font-size: 1.1rem; min-height: 58px; margin-top: 16px; }
+.btn-danger { background: transparent; border-color: var(--danger); color: var(--danger); }
+
+.btn-round {
+  width: 72px;
+  height: 72px;
+  border-radius: 50%;
+  font-size: 1rem;
+  font-variant-numeric: tabular-nums;
+}
+.btn-toggle {
+  width: 88px;
+  height: 88px;
+  font-size: 2rem;
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+.btn-toggle:active { background: var(--accent-press); }
+
+.btn-small { min-height: 46px; padding: 8px 14px; font-size: 0.95rem; }
+.icon-btn {
+  min-height: 40px; min-width: 40px;
+  background: transparent; border: none;
+  color: var(--muted); font-size: 1.2rem; cursor: pointer;
+}
+
+/* ===== Barra superior ===== */
+.topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 0;
+  border-bottom: 1px solid var(--border);
+}
+.brand { color: var(--muted); font-size: 0.9rem; letter-spacing: 0.05em; }
+.dots { display: flex; align-items: center; gap: 10px; }
+
+.dot {
+  width: 10px; height: 10px;
+  border-radius: 50%;
+  background: var(--danger);
+  display: inline-block;
+  transition: background 0.3s;
+}
+.dot.on { background: var(--ok); }
+
+/* ===== Avisos ===== */
+.banner {
+  margin-top: 10px;
+  padding: 10px 14px;
+  background: rgba(224, 82, 96, 0.12);
+  border: 1px solid var(--danger);
+  border-radius: 10px;
+  color: var(--danger);
+  font-size: 0.9rem;
+  text-align: center;
+}
+.toast {
+  margin-top: 10px;
+  padding: 10px 14px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  color: var(--muted);
+  font-size: 0.9rem;
+  text-align: center;
+}
+
+/* ===== Now playing ===== */
+.now {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 4px;
+  padding: 24px 4px;
+  text-align: center;
+}
+.np-title { font-size: 1.25rem; font-weight: 600; margin: 0; overflow-wrap: anywhere; }
+.np-state { color: var(--muted); margin: 0; min-height: 1.4em; }
+
+.scrub { display: flex; align-items: center; gap: 10px; margin-top: 14px; }
+.scrub span { color: var(--muted); font-variant-numeric: tabular-nums; font-size: 0.9rem; min-width: 3.2em; }
+.scrub span:last-child { text-align: right; }
+
+input[type="range"] {
+  -webkit-appearance: none;
+  appearance: none;
+  flex: 1;
+  height: 44px; /* área de toque generosa */
+  background: transparent;
+  cursor: pointer;
+}
+input[type="range"]::-webkit-slider-runnable-track {
+  height: 8px; border-radius: 4px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+}
+input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 26px; height: 26px;
+  margin-top: -10px;
+  border-radius: 50%;
+  background: var(--accent);
+  border: none;
+}
+input[type="range"]::-moz-range-track {
+  height: 8px; border-radius: 4px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+}
+input[type="range"]::-moz-range-thumb {
+  width: 26px; height: 26px; border-radius: 50%;
+  background: var(--accent); border: none;
+}
+
+/* ===== Seletor de aba ===== */
+.target { padding: 8px 0; }
+.target label { display: block; margin: 0 0 4px; }
+
+/* ===== Controles ===== */
+.controls { display: flex; flex-direction: column; gap: 14px; padding-bottom: 8px; }
+.row { display: flex; align-items: center; justify-content: center; gap: 22px; }
+.row-aux { gap: 12px; }
+.row-aux input[type="range"] { flex: 1; }
+
+/* ===== Diálogo de ajustes ===== */
+dialog {
+  background: var(--surface);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 22px;
+  max-width: 90vw;
+}
+dialog::backdrop { background: rgba(0, 0, 0, 0.6); }
+dialog h2 { margin: 0 0 10px; font-size: 1.1rem; }
+.dialog-actions { display: flex; flex-direction: column; gap: 10px; margin-top: 16px; }
