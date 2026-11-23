@@ -57,3 +57,46 @@ Chrome indisponível; extensão impossível de carregar em qualquer modo; API MV
 
 ## Closeout
 Relatório final com: fases concluídas, evidências, estado final (Completed/Partially completed/Blocked/Safely interrupted), itens pendentes e ação de retomada. CHANGELOG v0.2.0 + tag após Fase 4.
+
+### Closeout — Fase 4 concluída (2026-11-23)
+
+**Estado final: Completed.**
+
+Fases 1–4 concluídas. Critérios de aceitação:
+
+1. **`make e2e` passa com a cadeia real** ✔ — Chrome dedicado (perfil
+   temporário, porta CDP própria), extensão de produção via
+   `Extensions.loadUnpacked`, mídia local (ffmpeg → webm), validação via
+   CDP: extensão conecta, `state` reporta mídia tocando, `pause`/`play`/
+   `seekTo`/`setVolume` refletem no elemento. `make e2e-tls` idem em modo
+   `--tls` (HTTPS verificado contra o cert de teste, wss, service worker
+   pronto, extensão via listener loopback porta+1).
+2. **`go test ./...` verde, incluindo rate-limit** ✔ — lockout por IP:
+   `TestWSLockoutAfterRepeatedFailures`, `TestWSLockoutIsPerIP`,
+   `TestWSLockoutCounterResetsOnSuccess`,
+   `TestAuthLimiterWindowExpiresAndIsNotExtended` (5 falhas → 60s, estrito,
+   compare em tempo constante).
+3. **QR + `--tls`/SW** ✔ — QR no banner só em TTY (gating testado); `--tls`
+   serve HTTPS com cert self-signed persistido e SW registrável, validado
+   via CDP no `make e2e-tls`.
+4. **Confirmação do usuário** ✔ — "Funcionou perfeitamente": extensão
+   conectada no Chrome diário e controles (play/pause/seek/volume)
+   funcionando a partir do celular, sobre TLS.
+5. **Tag `v0.2.0` no tip do main, `git describe` limpo** ✔ — tag anotada
+   criada após os commits de closeout.
+
+Entregáveis do closeout: CHANGELOG `[v0.2.0]`, README de publicação em
+inglês (+ `README.pt-BR.md` com cross-link, + `LICENSE` MIT), screenshot
+real da UI capturado pelo harness E2E (`docs/screenshot.png`), tag
+anotada `v0.2.0`.
+
+Pendências / future work:
+
+- **Publicação no GitHub** — passo manual do usuário (repo local, sem
+  remotes por decisão do goal; nada a retomar do lado do código).
+- Limitações de plataforma permanecem e estão documentadas no README:
+  sem next/prev track (Media Session não pode ser disparado
+  externamente), DRM pode aceitar comandos sem efeito, PWA completo
+  exige `--tls`.
+
+Ação de retomada: nenhuma — goal encerrado.
