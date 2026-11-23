@@ -5,11 +5,13 @@ package main
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -95,6 +97,9 @@ func dialCDP(ctx context.Context, wsURL string) (*cdpConn, error) {
 	if err != nil {
 		return nil, err
 	}
+	// respostas CDP podem ser grandes (ex.: Page.captureScreenshot em base64);
+	// o limite default de leitura do coder/websocket (32KiB) as descartaria.
+	conn.SetReadLimit(64 << 20)
 	return &cdpConn{conn: conn}, nil
 }
 
@@ -249,6 +254,51 @@ func (c *cdpConn) click(ctx context.Context, seletorCSS string) error {
 		}
 	}
 	return nil
+}
+
+// captureScreenshot salva um screenshot PNG (Page.captureScreenshot) da aba
+// conectada por page, emulando um viewport de celular (390x844, dpr 2, touch).
+// Antes da captura, espera o now-playing da UI refletir a mídia de verdade —
+// o título chega à aba via hub (state), então a imagem mostra o estado
+// conectado completo: indicadores servidor+extensão acesos e mídia tocando.
+func captureScreenshot(ctx context.Context, page *cdpConn, path string) error {
+	if err := page.waitForExpr(ctx,
+		`(function(){
+			var t = document.getElementById("np-title").textContent;
+			return t !== "Nada tocando" && t !== "Escolha uma aba" && t !== "Sem título";
+		})()`,
+		15*time.Second); err != nil {
+		return fmt.Errorf("UI não mostrou a mídia tocando: %w", err)
+	}
+	if _, err := page.call(ctx, "Emulation.setDeviceMetricsOverride", map[string]any{
+		"width":             390,
+		"height":            844,
+		"deviceScaleFactor": 2,
+		"mobile":            true,
+	}); err != nil {
+		return fmt.Errorf("setDeviceMetricsOverride: %w", err)
+	}
+	// deixa o relayout assentar antes da captura
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-time.After(700 * time.Millisecond):
+	}
+	res, err := page.call(ctx, "Page.captureScreenshot", map[string]any{"format": "png"})
+	if err != nil {
+		return fmt.Errorf("captureScreenshot: %w", err)
+	}
+	var out struct {
+		Data string `json:"data"`
+	}
+	if err := json.Unmarshal(res, &out); err != nil || out.Data == "" {
+		return fmt.Errorf("captureScreenshot: resposta inesperada: %s", string(res))
+	}
+	raw, err := base64.StdEncoding.DecodeString(out.Data)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, raw, 0o644)
 }
 
 // browser é a conexão CDP de nível de browser.

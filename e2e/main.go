@@ -73,6 +73,7 @@ func run() error {
 	headlessFlag := flag.Bool("headless", true, "headless=new (false = headed, para depuração)")
 	keepFlag := flag.Bool("keep", false, "não remove os diretórios temporários ao final (depuração)")
 	verboseFlag := flag.Bool("v", false, "loga todos os frames state/cmdResult recebidos")
+	shotFlag := flag.String("screenshot", "", "salva um screenshot PNG da UI conectada no navegador de teste (requer -tls; viewport 390x844, mídia tocando)")
 	flag.Parse()
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -117,6 +118,9 @@ func run() error {
 			_ = os.RemoveAll(tmpDir)
 		}
 	}()
+	if *shotFlag != "" && !*tlsFlag {
+		return errors.New("-screenshot requer -tls (a UI no navegador de teste só é exercida nesse modo)")
+	}
 	mediaDir := filepath.Join(tmpDir, "media")
 	profileDir := filepath.Join(tmpDir, "chrome-profile")
 	serverLog := filepath.Join(tmpDir, "server.log")
@@ -350,6 +354,10 @@ func run() error {
 	}
 
 	// ---------- asserções exclusivas do modo -tls (lado navegador) ----------
+	// uiPage é a conexão CDP da aba da UI no navegador de teste; guardada
+	// fora do bloco para o passo opcional de screenshot (captura a UI
+	// conectada com mídia tocando).
+	var uiPage *cdpConn
 	if *tlsFlag {
 		uiBase := fmt.Sprintf("%s://127.0.0.1:%d", scheme, serverPort)
 
@@ -359,7 +367,7 @@ func run() error {
 		if err != nil {
 			return err
 		}
-		uiPage, err := dialCDP(ctx, uiTab.WS)
+		uiPage, err = dialCDP(ctx, uiTab.WS)
 		if err != nil {
 			return err
 		}
@@ -490,6 +498,19 @@ func run() error {
 		return nil
 	}); err != nil {
 		return err
+	}
+
+	// ---------- screenshot opcional da UI conectada ----------
+	// Requer -tls (a aba da UI no navegador só existe nesse modo): captura
+	// o estado conectado de verdade — dots servidor+extensão acesos e
+	// now-playing vindo do state via hub, com viewport de celular.
+	if *shotFlag != "" {
+		if err := step("screenshot da UI conectada (viewport 390x844, mídia tocando)", func() error {
+			return captureScreenshot(ctx, uiPage, *shotFlag)
+		}); err != nil {
+			return err
+		}
+		logf("screenshot salvo em %s", *shotFlag)
 	}
 
 	// (c) posição avança (dois states com delta >=0.5; e currentTime no elemento)
