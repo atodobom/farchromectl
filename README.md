@@ -1,305 +1,251 @@
 # farchromectl
 
-Controle as mídias que estão tocando no seu Chrome **a partir do celular**, na
-mesma rede Wi-Fi/LAN.
+**English** | [Português (BR)](README.pt-BR.md)
 
-```
-[celular / navegador] <--WebSocket--> [servidor Go, binário único, UI embutida] <--WebSocket--> [extensão Chrome MV3] --> <video>/<audio> nas abas
-```
+[![Go version](https://img.shields.io/badge/Go-1.23%2B-00ADD8?logo=go&logoColor=white)](https://go.dev)
+[![Chrome MV3](https://img.shields.io/badge/Chrome%20Extension-Manifest%20V3-4285F4?logo=googlechrome&logoColor=white)](https://developer.chrome.com/docs/extensions/develop)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-O servidor fica rodando no computador, serve uma UI web otimizada para toque e
-faz o relay dos comandos entre o celular e a extensão do Chrome. Nada sai da
-sua rede local.
+Control the media playing in your Chrome — **from your phone**, over your
+home Wi-Fi/LAN. One compiled Go binary with the web UI embedded, plus a tiny
+Chrome extension. No runtime dependencies, no cloud: nothing leaves your
+local network.
+
+![UI connected, media playing](docs/screenshot.png)
+
+The screenshot above is the real web UI, captured by the project's own E2E
+harness: a dedicated Chrome with the production extension installed, media
+playing, server and extension indicators connected.
 
 ---
 
-## Requisitos
+## Features
 
-- Go 1.22+ (só para compilar; o binário final é estático e único);
-- Google Chrome (ou Chromium/Edge compatível com Manifest V3);
-- Celular e computador na **mesma rede** (Wi-Fi de casa, por exemplo).
+- Play/pause, seek ±10s and scrubbing
+- Volume, mute and playback speed (1×, 1.25×, 1.5×, 2×)
+- Multi-tab target selector — choose which tab the controls drive
+- Now-playing metadata (title, position, duration)
+- Token authentication: 6-digit PIN with per-IP lockout
+- Discovery from the phone: last working URL → mDNS name
+  (`farchromectl.local`) → manual entry
+- LAN URLs and a QR code printed in the terminal at startup
+- Optional TLS (`--tls`): self-signed certificate, installable PWA on the
+  phone
+- Extension auto-reconnects (MV3 service worker) — survives Chrome's idle
+  suspension
+- Credentials remembered on the phone; no re-login on reconnects
 
-## Build
+## How it works
+
+```mermaid
+flowchart LR
+    Phone["📱 Phone browser<br>(touch UI — installable PWA with --tls)"]
+    Server["farchromectl<br>(single Go binary, embedded web UI)"]
+    Ext["Chrome MV3 extension<br>(service worker, auto-reconnect)"]
+    Media["&lt;video&gt; / &lt;audio&gt;<br>in your tabs"]
+
+    Phone <-->|"ws:// — wss:// with --tls"| Server
+    Server <-->|"ws://127.0.0.1:8080/ws"| Ext
+    Ext <-->|"commands & state"| Media
+```
+
+With `--tls`, the topology stays the same, but the two links use different
+listeners:
+
+```mermaid
+flowchart LR
+    subgraph Computer["Computer"]
+        Server["farchromectl hub"]
+        Main["main port, e.g. 8443<br>HTTPS / WSS (self-signed cert)"]
+        Loop["loopback port + 1, e.g. 8444<br>plain HTTP / WS — 127.0.0.1 only"]
+        Server --- Main
+        Server --- Loop
+    end
+    Phone["📱 Phone"] <-->|"HTTPS + WSS"| Main
+    Ext["Chrome extension"] <-->|"WS (plain)"| Loop
+```
+
+The phone gets HTTPS (secure context → service worker → installable PWA).
+The extension keeps plain WebSocket on a loopback-only listener at
+**main port + 1**: that traffic never leaves the machine, so converting it
+to `wss://` would only add a certificate-import step to Chrome — no
+security gain.
+
+## Requirements
+
+- Go 1.23+ (build time only — the resulting binary is static and standalone);
+- Google Chrome, Chromium or Edge (Manifest V3);
+- Phone and computer on the **same network** (home Wi-Fi, for example).
+
+## Quick start
+
+1. Build:
+
+   ```sh
+   make build                 # → bin/farchromectl
+   # or directly:
+   go build -o bin/farchromectl ./cmd/farchromectl
+   ```
+
+   If Go is installed in your user space, put it on `PATH` first (adjust to
+   your install):
+
+   ```sh
+   export PATH="$HOME/.local/go-toolchain/bin:$PATH"
+   ```
+
+   Optional install: `make install` (copies to `~/.local/bin/farchromectl`).
+
+2. Run the server:
+
+   ```sh
+   ./bin/farchromectl             # default: http://<LAN-IP>:8080
+   ./bin/farchromectl --tls       # optional: HTTPS + installable PWA
+   ```
+
+   On first run it generates a **6-digit token**, saves it to
+   `~/.config/farchromectl/config.json` (mode `0600`) and prints it in the
+   banner, together with the LAN URLs and a **QR code** pointing at the main
+   URL (the QR is only printed when stdout is a terminal).
+
+3. Install the extension in desktop Chrome:
+
+   - open `chrome://extensions`, enable **Developer mode**, click
+     **Load unpacked** and select the `extension/` folder of this project;
+   - open the extension's **Options** page and fill in the **port** and
+     **token** printed by the server — port `8080` in plain mode; with
+     `--tls`, the **loopback port** (main port + 1, e.g. `8081` — the exact
+     port is printed in the banner).
+
+4. From the phone (same Wi-Fi): **scan the QR code** with the camera or open
+   one of the printed URLs, then enter the token once — it is remembered by
+   the browser.
+
+## Configuration
+
+CLI flags:
+
+| Flag       | Default            | Description                                                                                          |
+|------------|--------------------|------------------------------------------------------------------------------------------------------|
+| `--addr`   | `0.0.0.0:8080`     | listen address, e.g. `--addr 0.0.0.0:9090`                                                           |
+| `--token`  | generated/persisted | force a specific 6-digit token (does not change the saved file)                                      |
+| `--tls`    | off                | serve HTTPS with a local self-signed certificate (installable PWA); extension keeps loopback WS on port + 1 |
+| `--open`   | off                | open the UI in the local browser after startup (needs a graphical session)                            |
+| `--version`| —                  | print the binary version and exit                                                                    |
+
+Config file: `~/.config/farchromectl/config.json` (`0600`) — created on first
+run with the generated token. Delete it to get a new token, or override per
+run with `--token 123456` (remember to update the phone — "Forget
+credentials" in the UI settings — and the extension).
+
+TLS material: `cert.pem` + `key.pem` in the same directory, generated on the
+first `--tls` run and reused afterwards.
+
+Extension options: server port + token; under `--tls`, use the loopback port
+(main port + 1).
+
+## Security notes
+
+- **LAN-only by design**: no tunneling, no cloud relay, no remote access.
+- **Authentication**: 6-digit token on the WebSocket handshake, compared in
+  constant time. Five consecutive wrong tokens from one IP lock that IP out
+  for 60 s (strict: during the window the token is not even read, and
+  refused attempts do not extend it). Failure streaks decay after 10
+  minutes; a successful handshake clears them.
+- A 6-digit PIN assumes a **trusted home LAN** — not suitable for shared or
+  hostile networks.
+- The token is **never published in mDNS TXT records** (they carry only the
+  version).
+- Firewall: expose the port only to your LAN subnet, e.g.
+  `sudo ufw allow from 192.168.0.0/16 to any port 8080 proto tcp`.
+- **TLS** (`--tls`): ECDSA P-256 self-signed certificate, 825-day validity
+  (the longest lifetime iOS accepts for manually trusted certificates),
+  SANs covering `localhost`, `farchromectl.local`, `127.0.0.1` and the local
+  IPs. Reused across restarts; regenerated if your IP changes (reserve the
+  IP in your router to avoid re-trusting). Trust steps on the phone:
+  - **Android**: Settings → Security → Encryption & credentials → Install a
+    certificate → CA certificate → select the transferred `cert.pem`.
+  - **iOS**: send `cert.pem` to the phone, tap it → profile installed in
+    Settings → Profile Downloaded → then Settings → General → About →
+    Certificate Trust Settings → enable full trust for the certificate.
+
+## Discovery from the phone
+
+The UI tries, in order: (1) the last URL that worked; (2)
+`http(s)://farchromectl.local:<port>` (mDNS — needs `avahi-daemon` on the
+machine); (3) the manual connection form. With a **DHCP reservation** for
+the computer in your router, the first try always hits and the phone
+connects by itself.
+
+## Limitations
+
+- **No next/previous track**: the web platform does not allow triggering a
+  site's Media Session handlers externally — the buttons are not faked.
+- **DRM**: on protected streams, seek/volume may be accepted without real
+  effect; the UI surfaces the error instead of failing silently.
+- **Full PWA install requires `--tls`**: service workers need a secure
+  context; over plain LAN HTTP "Add to home screen" works but without
+  offline cache.
+- Commands go to the "best" detected media (playing > larger > longest);
+  with several tabs playing, pick the target in the UI's tab selector.
+
+## Development
 
 ```sh
-make build          # gera bin/farchromectl
-# ou diretamente:
-go build -o bin/farchromectl ./cmd/farchromectl
+make build       # build (version stamped from git describe)
+make test        # go test ./...
+make vet         # go vet ./...
+make e2e         # end-to-end with a real Chrome (plain HTTP mode)
+make e2e-tls     # end-to-end in --tls mode
 ```
 
-Instalar (opcional):
+`make e2e` drives a **real Chrome** with the **production extension**: a
+dedicated instance (temporary profile, dedicated debug port — your daily
+Chrome is never touched), extension installed via CDP
+`Extensions.loadUnpacked`, locally generated media, and the full chain
+asserted: extension connects, `state` reports the playing media, and
+`pause`/`play`/`seekTo`/`setVolume` are reflected in the media element.
+`make e2e-tls` additionally verifies the HTTPS/WSS handshake against the
+generated certificate, the service worker becoming ready
+(`navigator.serviceWorker.ready`) and the extension connecting through the
+loopback listener.
 
-```sh
-make install        # copia para ~/.local/bin/farchromectl
-```
-
-Testes e checagens:
-
-```sh
-make test   # go test ./...
-make vet    # go vet ./...
-```
-
-## Rodando o servidor
-
-```sh
-./bin/farchromectl
-```
-
-Na primeira execução ele gera um **PIN de 6 dígitos**, salva em
-`~/.config/farchromectl/config.json` e imprime no terminal:
+Project layout:
 
 ```
-  ╔══════════════════════════════════════════╗
-  ║   TOKEN (use no celular e na extensão)   ║
-  ║                 843127                   ║
-  ╚══════════════════════════════════════════╝
-
-  Abra no celular (mesma rede Wi-Fi):
-    http://192.168.0.10:8080
-    http://farchromectl.local:8080   (nome mDNS; requer avahi)
-
-  Escaneie com a câmera do celular (abre a UI):
-    ▄▄█▄█▄ ▀█ █▀▀▀▀▀█  …  ← QR da URL principal (IPv4)
-
-  Extensão do Chrome: ws://127.0.0.1:8080/ws (configure o token na página de opções)
+cmd/farchromectl/   entrypoint: flags, banner+QR, TLS/loopback listeners, shutdown
+internal/config/    token: generation (crypto/rand) and persistence
+internal/certs/     --tls: self-signed ECDSA cert (generate/persist/reuse)
+internal/hub/       WebSocket relay ui<->extension, extension status
+internal/server/    HTTP: /, /api/healthz, /ws (token auth + per-IP lockout)
+internal/mdns/      _farchromectl._tcp announcement (fail-soft; no token in TXT)
+web/                web UI embedded via go:embed (plain HTML/CSS/JS + sw.js, no build step)
+extension/          Chrome MV3 extension (no remote code)
+e2e/                E2E harness with a real Chrome (plain and -tls modes)
 ```
 
-O **QR** aponta para a URL principal (primeiro IPv4 não-loopback, na porta
-configurada) e só é impresso quando o stdout é um terminal — em
-pipe/redirecionamento para arquivo a saída fica limpa, sem blocos Unicode.
+Tests: `go test ./...` covers the hub (relay, broadcast, extension
+reconnect), config (token persistence), certs (generation/SANs/0600/reuse
+across runs), server (healthz/CORS, token rejection, lockout, full
+end-to-end flow over a real WebSocket dial), cmd (banner/QR/TTY gating,
+TLS+loopback listener pair) and mDNS (benign failure).
 
-Opções:
+## Versioning
 
-| Flag       | Padrão                 | Descrição                                                        |
-|------------|------------------------|------------------------------------------------------------------|
-| `--addr`   | `0.0.0.0:8080`         | endereço/porta de escuta (ex.: `--addr 0.0.0.0:9090`)            |
-| `--token`  | gerado/persistido      | força um token específico (6 dígitos); não altera o arquivo salvo|
-| `--tls`    | desligado              | serve HTTPS com certificado local self-signed — habilita PWA instalável (ver abaixo) |
-| `--open`   | desligado              | abre a UI no navegador local após iniciar (se houver sessão X11/Wayland) |
-| `--version`| —                      | imprime a versão do binário e sai                                |
-
-### Token e porta
-
-- O token é gerado **na primeira execução** e reaproveitado nas seguintes
-  (fica em `~/.config/farchromectl/config.json`, permissão `0600`).
-- Para trocar o token: apague o arquivo de configuração (um novo PIN é
-  gerado) ou use `--token 123456`. Lembre-se de atualizar o token no celular
-  ("Esquecer credenciais" nos ajustes da UI) e na extensão.
-- Nunca compartilhe o token fora da sua rede: quem o tiver na LAN controla as
-  mídias do seu Chrome.
-
-## TLS e PWA instalável (`--tls`)
-
-Por padrão o servidor fala HTTP puro: funciona direto na LAN, mas sem
-service worker — e portanto sem instalação como app/PWA no celular. Com
-`--tls`, o mesmo endereço/porta (`--addr`) passa a servir **HTTPS**:
-
-```sh
-./bin/farchromectl --tls
-```
-
-O que muda:
-
-- **Certificado local self-signed**, gerado automaticamente na primeira
-  execução com `--tls`: ECDSA P-256, validade de 825 dias, SANs
-  `localhost`, `farchromectl.local`, `127.0.0.1` e todos os IPs locais
-  não-loopback. Persistido em `~/.config/farchromectl/cert.pem` +
-  `key.pem` (permissão `0600`) e **reutilizado** nos restarts — o celular
-  não precisa "confiar" num certificado novo a cada vez. Se o IP da
-  máquina mudar (DHCP), o certificado é regenerado para incluir o IP novo;
-  reserve o IP no roteador (dica já na seção DHCP) para evitar isso.
-- **PWA instalável**: a UI registra um service worker (cache do app shell,
-  estratégia rede-primeiro) quando a página é servida em contexto seguro.
-  Em HTTP puro nada muda — não há nem tentativa de registro. A UI também
-  passa a derivar `wss://` da origem `https://` automaticamente.
-- **A extensão continua funcionando sem alteração**: ela conecta via
-  `ws://127.0.0.1:<porta>/ws` e não fala TLS. Com `--tls`, o servidor
-  sobe adicionalmente um segundo listener **HTTP puro, restrito a
-  127.0.0.1, na porta principal +1** (ex.: porta 8080 → loopback 8081),
-  compartilhando o mesmo hub. Nas opções da extensão, informe a porta
-  loopback (porta principal +1). O banner do terminal imprime a porta
-  exata. Esse tráfego nunca sai da máquina, então não há ganho de
-  segurança em convertê-lo para `wss://` — só um passo extra de
-  configuração (importar certificado no Chrome).
-
-### Confiar no certificado no celular (visão geral)
-
-O certificado é self-signed: o celular avisará na primeira visita. Para o
-PWA instalar e o service worker funcionar, o certificado precisa ser
-confiado no sistema:
-
-- **Android**: Settings → Security → Encryption & credentials → Install a
-  certificate → CA certificate → selecione o `cert.pem` transferido do
-  computador (o arquivo tem `IsCA`/`KeyUsageCertSign` justamente para
-  ser instalável como CA de usuário). Ajuste fino por fabricante.
-- **iOS**: envie o `cert.pem` para o celular (AirDrop/e-mail/arquivo),
-  toque nele → instalado como perfil em Settings → Profile Downloaded →
-  depois Settings → General → About → Certificate Trust Settings →
-  ative a confiança total para o certificado.
-
-O passo a passo assistido (com o celular real do usuário, incluindo o QR e
-a instalação do PWA) faz parte da validação manual da versão 0.2.
-
-## Instalando a extensão no Chrome (load unpacked)
-
-1. Abra `chrome://extensions`;
-2. Ative **"Modo do desenvolvedor"** (canto superior direito);
-3. Clique em **"Carregar sem compactação"** e selecione a pasta `extension/`
-   deste projeto;
-4. Abra as **opções da extensão** (ícone ⋮ → Opções na página de extensões):
-   informe a **porta** e o **token** impressos no terminal do servidor —
-   porta `8080` no modo padrão; com `--tls`, a **porta loopback** (porta
-   principal +1, ex.: `8081` — ver seção TLS);
-5. Com o servidor rodando e um vídeo/áudio tocando em alguma aba, o ícone de
-   "extensão" no canto da UI deve ficar verde.
-
-A extensão não carrega código remoto — só `background.js`, `content.js` e a
-página de opções locais.
-
-## Abrindo do celular
-
-1. Certifique-se de que o servidor está rodando e o celular está na mesma
-   rede Wi-Fi;
-2. Abra uma das URLs impressas no terminal — ou **escaneie o QR** do banner
-   com a câmera, que já abre a URL principal:
-   - `http://<IP-do-computador>:8080` (ex.: `http://192.168.0.10:8080`), ou
-   - `http://farchromectl.local:8080` (nome mDNS — ver abaixo);
-   - com `--tls` as URLs (e o QR) usam `https://` — o celular pedirá
-     confiança no certificado na primeira vez (ver seção TLS);
-3. Digite o token quando pedido. Ele fica salvo no navegador e não será
-   pedido de novo (enquanto não mudar).
-
-### Firewall
-
-Se o celular não conseguir abrir a URL, libere a porta no firewall do
-computador:
-
-```sh
-# Debian/Ubuntu (ufw):
-sudo ufw allow 8080/tcp
-
-# Fedora/RHEL (firewalld):
-sudo firewall-cmd --add-port=8080/tcp --permanent && sudo firewall-cmd --reload
-```
-
-### Nome mDNS (`farchromectl.local`)
-
-Para o nome `farchromectl.local` funcionar, o computador precisa responder
-mDNS — no Linux, instale/habilite o `avahi-daemon`:
-
-```sh
-sudo apt install avahi-daemon     # Debian/Ubuntu
-sudo systemctl enable --now avahi-daemon
-```
-
-Se o mDNS falhar, o servidor apenas imprime um aviso e continua funcionando
-por IP.
-
-### IP do computador muda toda hora? (DHCP)
-
-A UI tenta se reconectar sozinha: primeiro o último endereço que funcionou,
-depois `http://farchromectl.local:<porta>` e, por fim, cai no formulário
-manual. Ainda assim, a recomendação é **reservar o IP do computador no
-roteador** (vincular ao MAC address, geralmente em "DHCP → Address
-Reservation"). Com IP fixo, o celular conecta sempre no primeiro endereço.
-
-### iOS / Safari
-
-No iOS, sites adicionados à tela de início ("Adicionar à Tela de Início")
-mantêm o `localStorage` separado e estável — recomendado para o token não ser
-pedido a cada reinstalação do Safari. Em navegadores com "bloqueio de
-rastreio" agressivo, se o token sumir, use o botão "Esquecer credenciais" e
-entre de novo.
-
-## Solução de problemas
-
-| Sintoma | Causa provável | O que fazer |
-|---|---|---|
-| Ícone "extensão" fica vermelho na UI | extensão não conectou ao servidor | confira **porta e token** nas opções da extensão; o servidor precisa estar rodando |
-| UI não encontra o servidor | rede/firewall/IP mudou | mesma rede Wi-Fi? liberar porta no firewall (acima); anotar o IP novo do terminal |
-| "Nenhuma mídia detectada" | não há `<video>`/`<audio>` na aba | dê play em algum vídeo/áudio primeiro; páginas internas do Chrome (`chrome://…`) não têm content script |
-| Comando não tem efeito | DRM/stream protegido | alguns sites protegidos ignoram seek/volume externos — o erro é exibido na UI; não há contorno genérico |
-| `farchromectl.local` não abre | mDNS indisponível | instale/habilite `avahi-daemon` (acima) ou use o IP |
-| Extensão "adormece" após muito tempo sem mídia | service worker MV3 é suspenso pelo Chrome | normal: ao dar play em qualquer mídia (ou abrir as opções), ela reconecta sozinha em segundos |
-| Celular mostra aviso de segurança ao abrir com `--tls` | certificado self-signed ainda não confiando no celular | siga os passos de confiança (seção TLS); enquanto não confiar, dá para "prosseguir" e usar a UI, só sem PWA/service worker |
-| Extensão não conecta com `--tls` ligado | porta nas opções da extensão errada | use a porta **loopback** (porta principal +1, impressa no banner), não a porta principal |
-| `--tls` não sobe: "listener loopback … indisponível" | porta principal +1 ocupada por outro processo | use `--addr` com outra porta (o listener da extensão é sempre porta+1) |
-
-## Limitações (v0.1)
-
-- **Sem faixa anterior/próxima** (`next`/`prev`): os handlers de Media Session
-  dos sites não podem ser disparados externamente — não fingimos ter o
-  botão.
-- **DRM**: em streams protegidos, seek/volume podem não ter efeito; a UI
-  mostra o erro em vez de falhar silenciosamente.
-- **PWA exige `--tls`**: em HTTP puro pela LAN não há service worker (exige
-  contexto seguro) — "Adicionar à tela de início" funciona, mas sem cache
-  offline. Com `--tls` a UI vira PWA instalável (com o certificado confiado
-  no celular; ver seção TLS). O ícone em SVG pode não ser aceito por todos
-  os navegadores para o prompt de instalação — se o prompt não aparecer,
-  o "Adicionar à tela de início" segue disponível.
-- **Aba alvo**: comandos vão para a "melhor" mídia detectada (tocando >
-  maior > mais longa); com várias abas tocando, escolha a aba no seletor da UI.
-
-## Desenvolvimento
-
-```
-cmd/farchromectl/   entrypoint (flags, banner+QR, TLS/loopback, shutdown)
-internal/config/    token: geração (crypto/rand) e persistência
-internal/certs/     --tls: cert self-signed ECDSA (gera/persiste/reutiliza)
-internal/hub/       relay WebSocket ui<->ext, status de extensão
-internal/server/    HTTP: /, /api/healthz, /ws (auth por token)
-internal/mdns/      anúncio _farchromectl._tcp (fail-soft, sem token no TXT)
-web/                UI embutida via go:embed (HTML/CSS/JS puro + sw.js, sem build)
-extension/          extensão Chrome MV3 (sem código remoto)
-e2e/                harness E2E com Chrome real (modo plano e -tls)
-```
-
-Testes: `go test ./...` cobre hub (relay, broadcast, reconexão da extensão),
-config (persistência do token), certs (geração/SANs/0600/reuso entre
-execuções), server (healthz/CORS, rejeição de token, lockout, fluxo
-ponta-a-ponta com dial WebSocket real), cmd (banner/QR/gating TTY, par de
-listeners TLS+loopback) e mdns (falha benigna).
-
-### Teste E2E com Chrome real
-
-```sh
-make e2e        # modo padrão (HTTP puro)
-make e2e-tls    # modo --tls (HTTPS/wss/service worker/extensão via loopback)
-```
-
-Sobe o servidor em porta de teste com token conhecido, lança um **Chrome
-dedicado** (perfil temporário, headless, porta de debug própria — não toca
-no Chrome/perfil do usuário), instala a **extensão de produção** via CDP
-`Extensions.loadUnpacked` (necessário porque o Chrome 137+ branded ignora
-`--load-extension`), abre uma página com mídia local (vídeo via `ffmpeg`,
-com fallback para `<audio>` com WAV sintetizado em JS) e valida a cadeia
-completa: extensão conecta (`extStatus`), `state` reporta a mídia tocando e
-`pause`/`play`/`seekTo`/`setVolume` refletem no elemento. Requer
-google-chrome/chromium instalado; o play é disparado com clique real via
-CDP (`Input.dispatchMouseEvent`), respeitando a política de autoplay.
-
-No modo `-tls` (`make e2e-tls`), o servidor roda com `--tls` (certificado
-gerado em diretório temporário via `XDG_CONFIG_HOME` — o `~/.config` do
-usuário não é tocado), o lado Go verifica o HTTPS/wss **de verdade** contra
-esse certificado (sem desativar verificação), o Chrome recebe
-`--ignore-certificate-errors` e o harness valida adicionalmente: UI servida
-por `https:` em contexto seguro, a UI do próprio navegador autenticando por
-`wss` (indicadores servidor+extensão acesos), o service worker registrado e
-pronto (`navigator.serviceWorker.ready`) e a extensão de produção
-conectando pelo listener HTTP loopback (porta principal +1) com a cadeia
-completa de comandos passando igual ao modo plano.
-
-## Versionamento
-
-- Este projeto segue [SemVer](https://semver.org/lang/pt-BR/):
-  `MAJOR.MINOR.PATCH` — mudanças incompatíveis, funcionalidades novas e
-  correções, nessa ordem.
-- Cada release é marcado com uma **tag anotada**: `git tag -a vX.Y.Z -m "..."`.
-- A versão é **carimbada no binário** no `make build`, a partir do
+- This project follows [SemVer](https://semver.org/): `MAJOR.MINOR.PATCH`.
+- Each release is marked with an **annotated tag**: `git tag -a vX.Y.Z`.
+- The version is **stamped into the binary** at build time from
   `git describe --tags --always --dirty` (via
-  `-ldflags "-X main.version=…"`).
-- Para conferir a versão de um binário: `./bin/farchromectl --version`
-  (também exposta no `/api/healthz` e no anúncio mDNS).
-- Histórico de mudanças por versão: [CHANGELOG.md](CHANGELOG.md).
+  `-ldflags "-X main.version=…"`); check with `./bin/farchromectl
+  --version` (also exposed via `/api/healthz` and the mDNS announcement).
+- Per-release history: [CHANGELOG.md](CHANGELOG.md).
+
+## Contributing
+
+Bug reports and PRs are welcome. Please keep the bar the repo already holds:
+`gofmt`/`go vet`/`go test ./...` green, `make e2e` passing, conventional
+commits, no new runtime dependencies.
+
+## License
+
+MIT — see [LICENSE](LICENSE).
